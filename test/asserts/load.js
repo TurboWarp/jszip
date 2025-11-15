@@ -601,7 +601,8 @@ QUnit.module("load", function () {
                 assert.ok(false, "no exception were thrown");
                 done();
             }, function failure(e) {
-                assert.ok(e.message.match("stuk.github.io/jszip/documentation"), "the error message is useful");
+                assert.ok(e.message.match("can't find zip signature or end of central directory"), "the error message is useful");
+                assert.notOk(e.message.match("stuk.github.io/jszip/documentation"), "the error message does not reference jszip website");
                 done();
             });
     });
