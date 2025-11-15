@@ -817,4 +817,10 @@ QUnit.module("file", function () {
             })["catch"](JSZipTestUtils.assertNoError);
     });
 
+    QUnit.test("default file date is deterministic", function(assert) {
+        var zip = new JSZip();
+        zip.file("Hello.txt", "Hello World\n");
+        assert.equal(zip.files["Hello.txt"].date.valueOf(), 1716106843000);
+    });
+
 });
