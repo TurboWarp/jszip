@@ -326,7 +326,6 @@ module.exports = {
 "use strict";
 var USE_TYPEDARRAY = (typeof Uint8Array !== "undefined") && (typeof Uint16Array !== "undefined") && (typeof Uint32Array !== "undefined");
 
-var pako = require("pako");
 var utils = require("./utils");
 var GenericWorker = require("./stream/GenericWorker");
 
@@ -389,6 +388,7 @@ FlateWorker.prototype.cleanUp = function () {
  * issue #446.
  */
 FlateWorker.prototype._createPako = function () {
+    var pako = require("pako");
     this._pako = new pako[this._pakoAction]({
         chunkSize: 65536,
         raw: true,
@@ -1056,10 +1056,6 @@ JSZip.prototype.loadAsync = require("./load");
 JSZip.support = require("./support");
 JSZip.defaults = require("./defaults");
 
-// TODO find a better way to handle this version,
-// a require('package.json').version doesn't work with webpack, see #327
-JSZip.version = "3.10.1";
-
 JSZip.loadAsync = function (content, options) {
     return new JSZip().loadAsync(content, options);
 };
@@ -1369,7 +1365,10 @@ var fileAdd = function(name, data, originalOptions) {
      */
 
     var o = utils.extend(originalOptions || {}, defaults);
-    o.date = o.date || new Date();
+    // Upstream JSZip defaults to current date which makes zips non-deterministic unless
+    // user overwrites dates themselves. Instead, we'll default to this arbitrary constant
+    // date. It comes from commit 19fbe1140c147adb830751d90fbf5b2332de8c07.
+    o.date = o.date || new Date(1716106843000);
     if (o.compression !== null) {
         o.compression = o.compression.toUpperCase();
     }
@@ -3715,8 +3714,7 @@ ZipEntries.prototype = {
             var isGarbage = !this.isSignature(0, sig.LOCAL_FILE_HEADER);
 
             if (isGarbage) {
-                throw new Error("Can't find end of central directory : is this a zip file ? " +
-                                "If it is, see https://stuk.github.io/jszip/documentation/howto/read_zip.html");
+                throw new Error("Corrupted zip: can't find zip signature or end of central directory");
             } else {
                 throw new Error("Corrupted zip: can't find end of central directory");
             }
@@ -3798,14 +3796,90 @@ ZipEntries.prototype = {
         this.reader = readerFor(data);
     },
     /**
+     * Attempt to parse a zip without a central directory.
+     */
+    tryRecoverCorruptedZip: function() {
+        // Undo anything done by the central directory reader
+        this.reader.setIndex(0);
+        this.files = [];
+
+        // Zip comment is in central directory, so we have no comment
+        this.zipCommentLength = 0;
+        this.zipComment = [];
+
+        var possibleHeaders = 0;
+
+        // Without central directory, have to just search for file entry magic bytes
+        var length = this.reader.length;
+        for (var i = 0; i < length - 4; i++) {
+            if (
+                this.reader.byteAt(i) === 0x50 &&
+                this.reader.byteAt(i + 1) === 0x4B &&
+                this.reader.byteAt(i + 2) === 0x03 &&
+                this.reader.byteAt(i + 3) === 0x04
+            ) {
+                possibleHeaders++;
+                var zipEntry = this.tryRecoverFileEntry(i);
+                if (zipEntry) {
+                    this.files.push(zipEntry);
+                }
+            }
+        }
+
+        if (this.files.length === 0) {
+            if (possibleHeaders === 0) {
+                throw new Error("Corrupted zip: no central directory or any file headers");
+            }
+            throw new Error("Corrupted zip: no central directory, and " + possibleHeaders + " possible local headers could not be recovered");
+        }
+    },
+    /**
+     * Attempts to read a zip entry from only the local header.
+     * @param {number} index Index in this.reader where a file header appears to start
+     * @returns {ZipEntry|null} The zip entry if a valid one could be parsed, otherwise null.
+     */
+    tryRecoverFileEntry: function(index) {
+        this.reader.setIndex(index);
+
+        var zipEntry = new ZipEntry({
+            zip64: this.zip64
+        }, this.loadOptions);
+
+        try {
+            zipEntry.readLocalPartFromCorruptedZip(this.reader);
+            zipEntry.handleUTF8();
+            zipEntry.processAttributes();
+            return zipEntry;
+        } catch (error) {
+            // Invalid entry. Ignore it.
+            if (this.loadOptions.onUnrecoverableFileEntry) {
+                this.loadOptions.onUnrecoverableFileEntry(error);
+            }
+            return null;
+        }
+    },
+    /**
      * Read a zip file and create ZipEntries.
      * @param {String|ArrayBuffer|Uint8Array|Buffer} data the binary string representing a zip file.
      */
     load: function(data) {
         this.prepareReader(data);
-        this.readEndOfCentral();
-        this.readCentralDir();
-        this.readLocalFiles();
+
+        try {
+            this.readEndOfCentral();
+            this.readCentralDir();
+            this.readLocalFiles();
+        } catch (centralDirectoryError) {
+            if (this.loadOptions.recoverCorrupted) {
+                if (this.loadOptions.onCorruptCentralDirectory) {
+                    this.loadOptions.onCorruptCentralDirectory(centralDirectoryError);
+                }
+
+                this.tryRecoverCorruptedZip();
+            } else {
+                throw centralDirectoryError;
+            }
+        }
     }
 };
 // }}} end of ZipEntries
@@ -3820,6 +3894,7 @@ var crc32fn = require("./crc32");
 var utf8 = require("./utf8");
 var compressions = require("./compressions");
 var support = require("./support");
+var sig = require("./signature");
 
 var MADE_BY_DOS = 0x00;
 var MADE_BY_UNIX = 0x03;
@@ -3941,6 +4016,36 @@ ZipEntry.prototype = {
         this.readExtraFields(reader);
         this.parseZIP64ExtraField(reader);
         this.fileComment = reader.readData(this.fileCommentLength);
+    },
+
+    /**
+     * Reads the local part of a zip file. Used when the central part of the zip is missing.
+     * @param {DataReader} reader Reader pointing to the start of local part header signature
+     * @throws if the header is invalid
+     */
+    readLocalPartFromCorruptedZip: function(reader) {
+        // Read everything in the possible header
+        reader.readAndCheckSignature(sig.LOCAL_FILE_HEADER);
+        this.versionMadeBy = reader.readInt(2);
+        this.bitFlag = reader.readInt(2);
+        this.compressionMethod = reader.readString(2);
+        this.date = reader.readDate();
+        this.crc32 = reader.readInt(4);
+        this.compressedSize = reader.readInt(4);
+        this.uncompressedSize = reader.readInt(4);
+        this.fileNameLength = reader.readInt(2);
+        this.extraFieldsLength = reader.readInt(2);
+        this.fileName = reader.readData(this.fileNameLength);
+        this.readExtraFields(reader);
+        this.parseZIP64ExtraField(reader);
+
+        // TODO: more checks to verify that the header makes sense
+
+        var compression = findCompression(this.compressionMethod);
+        if (compression === null) {
+            throw new Error("Corrupted zip : compression " + utils.pretty(this.compressionMethod) + " unknown (inner file : " + utils.transformTo("string", this.fileName) + ")");
+        }
+        this.decompressed = new CompressedObject(this.compressedSize, this.uncompressedSize, this.crc32, compression, reader.readData(this.compressedSize));
     },
 
     /**
@@ -4106,7 +4211,7 @@ ZipEntry.prototype = {
 };
 module.exports = ZipEntry;
 
-},{"./compressedObject":2,"./compressions":3,"./crc32":4,"./reader/readerFor":22,"./support":30,"./utf8":31,"./utils":32}],35:[function(require,module,exports){
+},{"./compressedObject":2,"./compressions":3,"./crc32":4,"./reader/readerFor":22,"./signature":23,"./support":30,"./utf8":31,"./utils":32}],35:[function(require,module,exports){
 "use strict";
 
 var StreamHelper = require("./stream/StreamHelper");
