@@ -1,8 +1,6 @@
 "use strict";
 
 module.exports = function(grunt) {
-    var version = require("./package.json").version;
-
     grunt.initConfig({
         browserify: {
             all: {
@@ -21,7 +19,7 @@ module.exports = function(grunt) {
                         },
                         builtins: false
                     },
-                    banner: grunt.file.read("lib/license_header.js").replace(/__VERSION__/, version)
+                    banner: grunt.file.read("lib/license_header.js")
                 }
             }
         },
@@ -29,7 +27,7 @@ module.exports = function(grunt) {
             options: {
                 mangle: true,
                 preserveComments: false,
-                banner: grunt.file.read("lib/license_header.js").replace(/__VERSION__/, version)
+                banner: grunt.file.read("lib/license_header.js")
             },
             all: {
                 src: "dist/jszip.js",
