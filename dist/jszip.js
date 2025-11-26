@@ -1,6 +1,6 @@
 /*!
 
-JSZip v3.11.1 - A JavaScript class for generating and reading zip files
+JSZip v3.12.0 - A JavaScript class for generating and reading zip files
 <http://stuartk.com/jszip>
 
 (c) 2009-2016 Stuart Knightley <stuart [at] stuartk.com>
@@ -1906,6 +1906,17 @@ DataReader.prototype = {
             (dostime >> 11) & 0x1f, // hour
             (dostime >> 5) & 0x3f, // minute
             (dostime & 0x1f) << 1)); // second
+    },
+    /**
+     * @returns {boolean} true if the reader is all zeros or has 0 length.
+     */
+    isAllZeros: function() {
+        for (var i = 0; i < this.length; i++) {
+            if (this.byteAt(i) !== 0) {
+                return false;
+            }
+        }
+        return true;
     }
 };
 module.exports = DataReader;
@@ -3870,6 +3881,10 @@ ZipEntries.prototype = {
             this.readCentralDir();
             this.readLocalFiles();
         } catch (centralDirectoryError) {
+            if (this.reader.isAllZeros()) {
+                throw new Error("Corrupted zip: all zeros, unrecoverable");
+            }
+
             if (this.loadOptions.recoverCorrupted) {
                 if (this.loadOptions.onCorruptCentralDirectory) {
                     this.loadOptions.onCorruptCentralDirectory(centralDirectoryError);
