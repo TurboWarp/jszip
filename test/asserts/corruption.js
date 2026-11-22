@@ -41,4 +41,30 @@ QUnit.module("corruption", function () {
             })
             .catch(JSZipTestUtils.assertNoError);
     });
+
+    JSZipTestUtils.testZipFile("special error message for all zeros", "ref/zeros.bin", function(assert, file) {
+        var done = assert.async();
+        JSZip.loadAsync(file)
+            .then(function () {
+                assert.ok(false, "somehow successfully extracted zip of all zeros");
+                done();
+            })
+            .catch(function (err) {
+                assert.ok(err.message.match("all zeros"), "all zeros : the error message is useful");
+                done();
+            });
+    });
+
+    JSZipTestUtils.testZipFile("special error message for empty", "ref/empty.bin", function(assert, file) {
+        var done = assert.async();
+        JSZip.loadAsync(file)
+            .then(function () {
+                assert.ok(false, "somehow successfully extracted empty file");
+                done();
+            })
+            .catch(function (err) {
+                assert.ok(err.message.match("all zeros"), "empty : the error message is useful");
+                done();
+            });
+    });
 });
