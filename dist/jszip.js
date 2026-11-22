@@ -1365,10 +1365,7 @@ var fileAdd = function(name, data, originalOptions) {
      */
 
     var o = utils.extend(originalOptions || {}, defaults);
-    // Upstream JSZip defaults to current date which makes zips non-deterministic unless
-    // user overwrites dates themselves. Instead, we'll default to this arbitrary constant
-    // date. It comes from commit 19fbe1140c147adb830751d90fbf5b2332de8c07.
-    o.date = o.date || new Date(1716106843000);
+
     if (o.compression !== null) {
         o.compression = o.compression.toUpperCase();
     }
@@ -1389,8 +1386,21 @@ var fileAdd = function(name, data, originalOptions) {
     if (o.dir) {
         name = forceTrailingSlash(name);
     }
-    if (o.createFolders && (parent = parentFolder(name))) {
-        folderAdd.call(this, parent, true);
+
+    if (!o.date || o.createFolders) {
+        parent = parentFolder(name);
+    }
+
+    if (!o.date) {
+        var parentEntry = parent && this.files[forceTrailingSlash(parent)];
+        // Upstream JSZip defaults to current date which makes zips non-deterministic unless
+        // user overwrites dates themselves. Instead, we'll default to this arbitrary constant
+        // date. It comes from commit 19fbe1140c147adb830751d90fbf5b2332de8c07.
+        o.date = parentEntry ? parentEntry.date : new Date(1716106843000);
+    }
+
+    if (o.createFolders && parent) {
+        folderAdd.call(this, parent, true, o.date);
     }
 
     var isUnicodeString = dataType === "string" && o.binary === false && o.base64 === false;
@@ -1472,9 +1482,10 @@ var forceTrailingSlash = function(path) {
  * @param {string} name the folder's name
  * @param {boolean=} [createFolders] If true, automatically create sub
  *  folders. Defaults to false.
+ * @param {Date} [date] date of folder
  * @return {Object} the new folder.
  */
-var folderAdd = function(name, createFolders) {
+var folderAdd = function(name, createFolders, date) {
     createFolders = (typeof createFolders !== "undefined") ? createFolders : defaults.createFolders;
 
     name = forceTrailingSlash(name);
@@ -1483,7 +1494,8 @@ var folderAdd = function(name, createFolders) {
     if (!this.files[name]) {
         fileAdd.call(this, name, null, {
             dir: true,
-            createFolders: createFolders
+            createFolders: createFolders,
+            date: date
         });
     }
     return this.files[name];
@@ -3407,16 +3419,17 @@ exports.getTypeOf = function(input) {
     if (typeof input === "string") {
         return "string";
     }
-    if (Object.prototype.toString.call(input) === "[object Array]") {
+    var proto = Object.prototype.toString.call(input);
+    if (proto === "[object Array]") {
         return "array";
     }
     if (support.nodebuffer && nodejsUtils.isBuffer(input)) {
         return "nodebuffer";
     }
-    if (support.uint8array && input instanceof Uint8Array) {
+    if (support.uint8array && proto === "[object Uint8Array]") {
         return "uint8array";
     }
-    if (support.arraybuffer && input instanceof ArrayBuffer) {
+    if (support.arraybuffer && proto === "[object ArrayBuffer]") {
         return "arraybuffer";
     }
 };
@@ -3509,24 +3522,29 @@ exports.prepareContent = function(name, inputData, isBinary, isOptimizedBinarySt
 
         var isBlob = support.blob && (data instanceof Blob || ["[object File]", "[object Blob]"].indexOf(Object.prototype.toString.call(data)) !== -1);
 
-        if (isBlob && typeof FileReader !== "undefined") {
-            return new external.Promise(function (resolve, reject) {
-                var reader = new FileReader();
+        if (isBlob) {
+            if (typeof Blob.prototype.arrayBuffer !== "undefined") {
+                return data.arrayBuffer();
+            } else if (typeof FileReader !== "undefined") {
+                return new external.Promise(function (resolve, reject) {
+                    var reader = new FileReader();
 
-                reader.onload = function(e) {
-                    resolve(e.target.result);
-                };
-                reader.onerror = function(e) {
-                    reject(e.target.error);
-                };
-                reader.readAsArrayBuffer(data);
-            });
-        } else if (isBlob && typeof data.arrayBuffer === "function") {
-            // Node.js supports Blob but not FileReader
-            return data.arrayBuffer();
-        } else {
-            return data;
+                    reader.onload = function(e) {
+                        resolve(e.target.result);
+                    };
+                    reader.onerror = function(e) {
+                        reject(e.target.error);
+                    };
+                    reader.readAsArrayBuffer(data);
+                });
+            } else {
+                return external.Promise.reject(
+                    new Error(name + " is a Blob, but we have no way of reading it.")
+                );
+            }
         }
+
+        return data;
     });
 
     return promise.then(function(data) {
