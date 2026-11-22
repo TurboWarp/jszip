@@ -118,7 +118,7 @@ exports.decode = function(input) {
     return output;
 };
 
-},{"./support":30,"./utils":32}],2:[function(require,module,exports){
+},{"./support":31,"./utils":33}],2:[function(require,module,exports){
 "use strict";
 
 var external = require("./external");
@@ -194,7 +194,7 @@ CompressedObject.createWorkerFrom = function (uncompressedWorker, compression, c
 
 module.exports = CompressedObject;
 
-},{"./external":6,"./stream/Crc32Probe":25,"./stream/DataLengthProbe":26,"./stream/DataWorker":27}],3:[function(require,module,exports){
+},{"./external":6,"./stream/Crc32Probe":26,"./stream/DataLengthProbe":27,"./stream/DataWorker":28}],3:[function(require,module,exports){
 "use strict";
 
 var GenericWorker = require("./stream/GenericWorker");
@@ -210,7 +210,7 @@ exports.STORE = {
 };
 exports.DEFLATE = require("./flate");
 
-},{"./flate":7,"./stream/GenericWorker":28}],4:[function(require,module,exports){
+},{"./flate":7,"./stream/GenericWorker":29}],4:[function(require,module,exports){
 "use strict";
 
 var utils = require("./utils");
@@ -289,7 +289,7 @@ module.exports = function crc32wrapper(input, crc) {
     }
 };
 
-},{"./utils":32}],5:[function(require,module,exports){
+},{"./utils":33}],5:[function(require,module,exports){
 "use strict";
 exports.base64 = false;
 exports.binary = false;
@@ -322,7 +322,7 @@ module.exports = {
     Promise: ES6Promise
 };
 
-},{"lie":37}],7:[function(require,module,exports){
+},{"lie":38}],7:[function(require,module,exports){
 "use strict";
 var USE_TYPEDARRAY = (typeof Uint8Array !== "undefined") && (typeof Uint16Array !== "undefined") && (typeof Uint32Array !== "undefined");
 
@@ -410,7 +410,7 @@ exports.uncompressWorker = function () {
     return new FlateWorker("Inflate", {});
 };
 
-},{"./stream/GenericWorker":28,"./utils":32,"pako":38}],8:[function(require,module,exports){
+},{"./stream/GenericWorker":29,"./utils":33,"pako":39}],8:[function(require,module,exports){
 "use strict";
 
 var utils = require("../utils");
@@ -951,7 +951,7 @@ ZipFileWorker.prototype.lock = function () {
 
 module.exports = ZipFileWorker;
 
-},{"../crc32":4,"../signature":23,"../stream/GenericWorker":28,"../utf8":31,"../utils":32}],9:[function(require,module,exports){
+},{"../crc32":4,"../signature":24,"../stream/GenericWorker":29,"../utf8":32,"../utils":33}],9:[function(require,module,exports){
 "use strict";
 
 var compressions = require("../compressions");
@@ -1063,7 +1063,7 @@ JSZip.loadAsync = function (content, options) {
 JSZip.external = require("./external");
 module.exports = JSZip;
 
-},{"./defaults":5,"./external":6,"./load":11,"./object":15,"./support":30}],11:[function(require,module,exports){
+},{"./defaults":5,"./external":6,"./load":11,"./object":16,"./support":31}],11:[function(require,module,exports){
 "use strict";
 var utils = require("./utils");
 var external = require("./external");
@@ -1153,7 +1153,96 @@ module.exports = function (data, options) {
         });
 };
 
-},{"./external":6,"./nodejsUtils":14,"./stream/Crc32Probe":25,"./utf8":31,"./utils":32,"./zipEntries":33}],12:[function(require,module,exports){
+},{"./external":6,"./nodejsUtils":15,"./stream/Crc32Probe":26,"./utf8":32,"./utils":33,"./zipEntries":34}],12:[function(require,module,exports){
+"use strict";
+/* global DecompressionStream */
+
+var external = require("./external");
+var utils = require("./utils");
+
+var ignore = function () {};
+
+/**
+ * @param {Uint8Array[]} chunks the chunks.
+ * @param {number} length their total length.
+ * @return {Uint8Array} the chunks joined, in a buffer of exactly that length.
+ */
+var join = function (chunks, length) {
+    if (chunks.length === 1 && chunks[0].byteOffset === 0 && chunks[0].buffer.byteLength === length) {
+        return chunks[0];
+    }
+    var result = new Uint8Array(length);
+    var offset = 0;
+    for (var i = 0; i < chunks.length; i++) {
+        result.set(chunks[i], offset);
+        offset += chunks[i].length;
+    }
+    return result;
+};
+
+/**
+ * Inflate raw DEFLATE data with DecompressionStream.
+ * @param {String|Array|Uint8Array|Buffer} compressed the data.
+ * @param {number} uncompressedSize the expected size.
+ * @return {Promise<Uint8Array|null>} the data, or null on any failure or size mismatch.
+ */
+exports.inflate = function (compressed, uncompressedSize) {
+    return new external.Promise(function (resolve) {
+        var reader = null;
+        var fail = function () {
+            if (reader) {
+                reader.cancel().then(ignore, ignore);
+                reader = null;
+            }
+            resolve(null);
+        };
+
+        try {
+            if (typeof DecompressionStream !== "function") {
+                fail();
+                return;
+            }
+            // Throws in browsers without "deflate-raw".
+            var stream = new DecompressionStream("deflate-raw");
+            var writer = stream.writable.getWriter();
+            // The reader reports these errors too.
+            writer.write(utils.unsharedUint8Array(compressed)).then(ignore, ignore);
+            writer.close().then(ignore, ignore);
+            reader = stream.readable.getReader();
+
+            var chunks = [];
+            var length = 0;
+            var onRead = function (step) {
+                if (!reader) {
+                    return;
+                }
+                try {
+                    if (step.done) {
+                        reader = null;
+                        resolve(length === uncompressedSize ? join(chunks, length) : null);
+                        return;
+                    }
+                    var chunk = step.value;
+                    // Stop early if there is too much output.
+                    if (!(chunk instanceof Uint8Array) || chunk.length > uncompressedSize - length) {
+                        fail();
+                        return;
+                    }
+                    chunks.push(chunk);
+                    length += chunk.length;
+                    reader.read().then(onRead, fail);
+                } catch (e) {
+                    fail();
+                }
+            };
+            reader.read().then(onRead, fail);
+        } catch (e) {
+            fail();
+        }
+    });
+};
+
+},{"./external":6,"./utils":33}],13:[function(require,module,exports){
 "use strict";
 
 var utils = require("../utils");
@@ -1229,7 +1318,7 @@ NodejsStreamInputAdapter.prototype.resume = function () {
 
 module.exports = NodejsStreamInputAdapter;
 
-},{"../stream/GenericWorker":28,"../utils":32}],13:[function(require,module,exports){
+},{"../stream/GenericWorker":29,"../utils":33}],14:[function(require,module,exports){
 "use strict";
 
 var Readable = require("readable-stream").Readable;
@@ -1273,7 +1362,7 @@ NodejsStreamOutputAdapter.prototype._read = function() {
 
 module.exports = NodejsStreamOutputAdapter;
 
-},{"../utils":32,"readable-stream":16}],14:[function(require,module,exports){
+},{"../utils":33,"readable-stream":17}],15:[function(require,module,exports){
 "use strict";
 
 module.exports = {
@@ -1332,7 +1421,7 @@ module.exports = {
     }
 };
 
-},{}],15:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 "use strict";
 var utf8 = require("./utf8");
 var utils = require("./utils");
@@ -1733,7 +1822,7 @@ var out = {
 };
 module.exports = out;
 
-},{"./compressedObject":2,"./defaults":5,"./generate":9,"./nodejs/NodejsStreamInputAdapter":12,"./nodejsUtils":14,"./stream/GenericWorker":28,"./stream/StreamHelper":29,"./utf8":31,"./utils":32,"./zipObject":35}],16:[function(require,module,exports){
+},{"./compressedObject":2,"./defaults":5,"./generate":9,"./nodejs/NodejsStreamInputAdapter":13,"./nodejsUtils":15,"./stream/GenericWorker":29,"./stream/StreamHelper":30,"./utf8":32,"./utils":33,"./zipObject":36}],17:[function(require,module,exports){
 "use strict";
 /*
  * This file is used by module bundlers (browserify/webpack/etc) when
@@ -1745,7 +1834,7 @@ module.exports = out;
  */
 module.exports = require("stream");
 
-},{"stream":undefined}],17:[function(require,module,exports){
+},{"stream":undefined}],18:[function(require,module,exports){
 "use strict";
 var DataReader = require("./DataReader");
 var utils = require("../utils");
@@ -1804,7 +1893,7 @@ ArrayReader.prototype.readData = function(size) {
 };
 module.exports = ArrayReader;
 
-},{"../utils":32,"./DataReader":18}],18:[function(require,module,exports){
+},{"../utils":33,"./DataReader":19}],19:[function(require,module,exports){
 "use strict";
 var utils = require("../utils");
 
@@ -1933,7 +2022,7 @@ DataReader.prototype = {
 };
 module.exports = DataReader;
 
-},{"../utils":32}],19:[function(require,module,exports){
+},{"../utils":33}],20:[function(require,module,exports){
 "use strict";
 var Uint8ArrayReader = require("./Uint8ArrayReader");
 var utils = require("../utils");
@@ -1954,7 +2043,7 @@ NodeBufferReader.prototype.readData = function(size) {
 };
 module.exports = NodeBufferReader;
 
-},{"../utils":32,"./Uint8ArrayReader":21}],20:[function(require,module,exports){
+},{"../utils":33,"./Uint8ArrayReader":22}],21:[function(require,module,exports){
 "use strict";
 var DataReader = require("./DataReader");
 var utils = require("../utils");
@@ -1994,7 +2083,7 @@ StringReader.prototype.readData = function(size) {
 };
 module.exports = StringReader;
 
-},{"../utils":32,"./DataReader":18}],21:[function(require,module,exports){
+},{"../utils":33,"./DataReader":19}],22:[function(require,module,exports){
 "use strict";
 var ArrayReader = require("./ArrayReader");
 var DataReader = require("./DataReader");
@@ -2022,7 +2111,7 @@ Uint8ArrayReader.prototype.readData = function(size) {
 };
 module.exports = Uint8ArrayReader;
 
-},{"../utils":32,"./ArrayReader":17,"./DataReader":18}],22:[function(require,module,exports){
+},{"../utils":33,"./ArrayReader":18,"./DataReader":19}],23:[function(require,module,exports){
 "use strict";
 
 var utils = require("../utils");
@@ -2052,7 +2141,7 @@ module.exports = function (data) {
     return new ArrayReader(utils.transformTo("array", data));
 };
 
-},{"../support":30,"../utils":32,"./ArrayReader":17,"./NodeBufferReader":19,"./StringReader":20,"./Uint8ArrayReader":21}],23:[function(require,module,exports){
+},{"../support":31,"../utils":33,"./ArrayReader":18,"./NodeBufferReader":20,"./StringReader":21,"./Uint8ArrayReader":22}],24:[function(require,module,exports){
 "use strict";
 exports.LOCAL_FILE_HEADER = "PK\x03\x04";
 exports.CENTRAL_FILE_HEADER = "PK\x01\x02";
@@ -2061,7 +2150,7 @@ exports.ZIP64_CENTRAL_DIRECTORY_LOCATOR = "PK\x06\x07";
 exports.ZIP64_CENTRAL_DIRECTORY_END = "PK\x06\x06";
 exports.DATA_DESCRIPTOR = "PK\x07\x08";
 
-},{}],24:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 "use strict";
 
 var GenericWorker = require("./GenericWorker");
@@ -2089,7 +2178,7 @@ ConvertWorker.prototype.processChunk = function (chunk) {
 };
 module.exports = ConvertWorker;
 
-},{"../utils":32,"./GenericWorker":28}],25:[function(require,module,exports){
+},{"../utils":33,"./GenericWorker":29}],26:[function(require,module,exports){
 "use strict";
 
 var GenericWorker = require("./GenericWorker");
@@ -2115,7 +2204,7 @@ Crc32Probe.prototype.processChunk = function (chunk) {
 };
 module.exports = Crc32Probe;
 
-},{"../crc32":4,"../utils":32,"./GenericWorker":28}],26:[function(require,module,exports){
+},{"../crc32":4,"../utils":33,"./GenericWorker":29}],27:[function(require,module,exports){
 "use strict";
 
 var utils = require("../utils");
@@ -2146,7 +2235,7 @@ DataLengthProbe.prototype.processChunk = function (chunk) {
 module.exports = DataLengthProbe;
 
 
-},{"../utils":32,"./GenericWorker":28}],27:[function(require,module,exports){
+},{"../utils":33,"./GenericWorker":29}],28:[function(require,module,exports){
 "use strict";
 
 var utils = require("../utils");
@@ -2264,7 +2353,7 @@ DataWorker.prototype._tick = function() {
 
 module.exports = DataWorker;
 
-},{"../utils":32,"./GenericWorker":28}],28:[function(require,module,exports){
+},{"../utils":33,"./GenericWorker":29}],29:[function(require,module,exports){
 "use strict";
 
 /**
@@ -2529,7 +2618,7 @@ GenericWorker.prototype = {
 
 module.exports = GenericWorker;
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 "use strict";
 
 var utils = require("../utils");
@@ -2745,7 +2834,7 @@ StreamHelper.prototype = {
 
 module.exports = StreamHelper;
 
-},{"../base64":1,"../external":6,"../nodejs/NodejsStreamOutputAdapter":13,"../support":30,"../utils":32,"./ConvertWorker":24,"./GenericWorker":28}],30:[function(require,module,exports){
+},{"../base64":1,"../external":6,"../nodejs/NodejsStreamOutputAdapter":14,"../support":31,"../utils":33,"./ConvertWorker":25,"./GenericWorker":29}],31:[function(require,module,exports){
 "use strict";
 
 exports.base64 = true;
@@ -2785,7 +2874,7 @@ try {
     exports.nodestream = false;
 }
 
-},{"readable-stream":16}],31:[function(require,module,exports){
+},{"readable-stream":17}],32:[function(require,module,exports){
 "use strict";
 
 var utils = require("./utils");
@@ -2797,15 +2886,6 @@ var GenericWorker = require("./stream/GenericWorker");
  * The following functions come from pako, from pako/lib/utils/strings
  * released under the MIT license, see pako https://github.com/nodeca/pako/
  */
-
-// Table with utf8 lengths (calculated by first byte of sequence)
-// Note, that 5 & 6-byte values and some 4-byte values can not be represented in JS,
-// because max possible codepoint is 0x10ffff
-var _utf8len = new Array(256);
-for (var i=0; i<256; i++) {
-    _utf8len[i] = (i >= 252 ? 6 : i >= 248 ? 5 : i >= 240 ? 4 : i >= 224 ? 3 : i >= 192 ? 2 : 1);
-}
-_utf8len[254]=_utf8len[254]=1; // Invalid sequence start
 
 // convert string to array (typed, when possible)
 var string2buf = function (str) {
@@ -2865,86 +2945,6 @@ var string2buf = function (str) {
     return buf;
 };
 
-// Calculate max possible position in utf8 buffer,
-// that will not break sequence. If that's not possible
-// - (very small limits) return max size as is.
-//
-// buf[] - utf8 bytes array
-// max   - length limit (mandatory);
-var utf8border = function(buf, max) {
-    var pos;
-
-    max = max || buf.length;
-    if (max > buf.length) { max = buf.length; }
-
-    // go back from last position, until start of sequence found
-    pos = max-1;
-    while (pos >= 0 && (buf[pos] & 0xC0) === 0x80) { pos--; }
-
-    // Fuckup - very small and broken sequence,
-    // return max, because we should return something anyway.
-    if (pos < 0) { return max; }
-
-    // If we came to start of buffer - that means vuffer is too small,
-    // return max too.
-    if (pos === 0) { return max; }
-
-    return (pos + _utf8len[buf[pos]] > max) ? pos : max;
-};
-
-// convert array to string
-var buf2string = function (buf) {
-    var i, out, c, c_len;
-    var len = buf.length;
-
-    // Reserve max possible length (2 words per char)
-    // NB: by unknown reasons, Array is significantly faster for
-    //     String.fromCharCode.apply than Uint16Array.
-    var utf16buf = new Array(len*2);
-
-    for (out=0, i=0; i<len;) {
-        c = buf[i++];
-        // quick process ascii
-        if (c < 0x80) { utf16buf[out++] = c; continue; }
-
-        c_len = _utf8len[c];
-        // skip 5 & 6 byte codes
-        if (c_len > 4) { utf16buf[out++] = 0xfffd; i += c_len-1; continue; }
-
-        // apply mask on first byte
-        c &= c_len === 2 ? 0x1f : c_len === 3 ? 0x0f : 0x07;
-        // join the rest
-        while (c_len > 1 && i < len) {
-            c = (c << 6) | (buf[i++] & 0x3f);
-            c_len--;
-        }
-
-        // terminated by end of string?
-        if (c_len > 1) { utf16buf[out++] = 0xfffd; continue; }
-
-        if (c < 0x10000) {
-            utf16buf[out++] = c;
-        } else {
-            c -= 0x10000;
-            utf16buf[out++] = 0xd800 | ((c >> 10) & 0x3ff);
-            utf16buf[out++] = 0xdc00 | (c & 0x3ff);
-        }
-    }
-
-    // shrinkBuf(utf16buf, out)
-    if (utf16buf.length !== out) {
-        if(utf16buf.subarray) {
-            utf16buf = utf16buf.subarray(0, out);
-        } else {
-            utf16buf.length = out;
-        }
-    }
-
-    // return String.fromCharCode.apply(null, utf16buf);
-    return utils.applyFromCharCode(utf16buf);
-};
-
-
 // That's all for the pako functions.
 
 
@@ -2963,6 +2963,8 @@ exports.utf8encode = function utf8encode(str) {
 };
 
 
+var decoder = new TextDecoder("utf-8", {ignoreBOM: true});
+
 /**
  * Transform a bytes array (or a representation) representing an UTF-8 encoded
  * string into a javascript string.
@@ -2970,13 +2972,7 @@ exports.utf8encode = function utf8encode(str) {
  * @return {String} the decoded string.
  */
 exports.utf8decode = function utf8decode(buf) {
-    if (support.nodebuffer) {
-        return utils.transformTo("nodebuffer", buf).toString("utf-8");
-    }
-
-    buf = utils.transformTo(support.uint8array ? "uint8array" : "array", buf);
-
-    return buf2string(buf);
+    return decoder.decode(utils.unsharedUint8Array(buf));
 };
 
 /**
@@ -2985,8 +2981,7 @@ exports.utf8decode = function utf8decode(buf) {
  */
 function Utf8DecodeWorker() {
     GenericWorker.call(this, "utf-8 decode");
-    // the last bytes if a chunk didn't end with a complete codepoint.
-    this.leftOver = null;
+    this.decoder = new TextDecoder("utf-8", {ignoreBOM: true});
 }
 utils.inherits(Utf8DecodeWorker, GenericWorker);
 
@@ -2994,36 +2989,8 @@ utils.inherits(Utf8DecodeWorker, GenericWorker);
  * @see GenericWorker.processChunk
  */
 Utf8DecodeWorker.prototype.processChunk = function (chunk) {
-
-    var data = utils.transformTo(support.uint8array ? "uint8array" : "array", chunk.data);
-
-    // 1st step, re-use what's left of the previous chunk
-    if (this.leftOver && this.leftOver.length) {
-        if(support.uint8array) {
-            var previousData = data;
-            data = new Uint8Array(previousData.length + this.leftOver.length);
-            data.set(this.leftOver, 0);
-            data.set(previousData, this.leftOver.length);
-        } else {
-            data = this.leftOver.concat(data);
-        }
-        this.leftOver = null;
-    }
-
-    var nextBoundary = utf8border(data);
-    var usableData = data;
-    if (nextBoundary !== data.length) {
-        if (support.uint8array) {
-            usableData = data.subarray(0, nextBoundary);
-            this.leftOver = data.subarray(nextBoundary, data.length);
-        } else {
-            usableData = data.slice(0, nextBoundary);
-            this.leftOver = data.slice(nextBoundary, data.length);
-        }
-    }
-
     this.push({
-        data : exports.utf8decode(usableData),
+        data : this.decoder.decode(utils.unsharedUint8Array(chunk.data), {stream: true}),
         meta : chunk.meta
     });
 };
@@ -3032,12 +2999,12 @@ Utf8DecodeWorker.prototype.processChunk = function (chunk) {
  * @see GenericWorker.flush
  */
 Utf8DecodeWorker.prototype.flush = function () {
-    if(this.leftOver && this.leftOver.length) {
+    var rest = this.decoder.decode();
+    if (rest) {
         this.push({
-            data : exports.utf8decode(this.leftOver),
+            data : rest,
             meta : {}
         });
-        this.leftOver = null;
     }
 };
 exports.Utf8DecodeWorker = Utf8DecodeWorker;
@@ -3062,7 +3029,7 @@ Utf8EncodeWorker.prototype.processChunk = function (chunk) {
 };
 exports.Utf8EncodeWorker = Utf8EncodeWorker;
 
-},{"./nodejsUtils":14,"./stream/GenericWorker":28,"./support":30,"./utils":32}],32:[function(require,module,exports){
+},{"./nodejsUtils":15,"./stream/GenericWorker":29,"./support":31,"./utils":33}],33:[function(require,module,exports){
 "use strict";
 
 var support = require("./support");
@@ -3435,6 +3402,20 @@ exports.getTypeOf = function(input) {
 };
 
 /**
+ * Convert to a Uint8Array, copying it if it uses shared memory.
+ * TextDecoder and DecompressionStream reject SharedArrayBuffer views.
+ * @param {String|Array|Uint8Array|ArrayBuffer|Buffer} data the data.
+ * @return {Uint8Array} the data, not backed by a SharedArrayBuffer.
+ */
+exports.unsharedUint8Array = function (data) {
+    var result = exports.transformTo("uint8array", data);
+    if (Object.prototype.toString.call(result.buffer) === "[object SharedArrayBuffer]") {
+        return new Uint8Array(result);
+    }
+    return result;
+};
+
+/**
  * Throw an exception if the type is not supported.
  * @param {String} type the type to check.
  * @throws {Error} an Error if the browser doesn't support the requested type.
@@ -3576,7 +3557,7 @@ exports.prepareContent = function(name, inputData, isBinary, isOptimizedBinarySt
     });
 };
 
-},{"./base64":1,"./external":6,"./nodejsUtils":14,"./support":30,"setimmediate":54}],33:[function(require,module,exports){
+},{"./base64":1,"./external":6,"./nodejsUtils":15,"./support":31,"setimmediate":55}],34:[function(require,module,exports){
 "use strict";
 var readerFor = require("./reader/readerFor");
 var utils = require("./utils");
@@ -3918,7 +3899,7 @@ ZipEntries.prototype = {
 // }}} end of ZipEntries
 module.exports = ZipEntries;
 
-},{"./reader/readerFor":22,"./signature":23,"./support":30,"./utils":32,"./zipEntry":34}],34:[function(require,module,exports){
+},{"./reader/readerFor":23,"./signature":24,"./support":31,"./utils":33,"./zipEntry":35}],35:[function(require,module,exports){
 "use strict";
 var readerFor = require("./reader/readerFor");
 var utils = require("./utils");
@@ -4244,14 +4225,17 @@ ZipEntry.prototype = {
 };
 module.exports = ZipEntry;
 
-},{"./compressedObject":2,"./compressions":3,"./crc32":4,"./reader/readerFor":22,"./signature":23,"./support":30,"./utf8":31,"./utils":32}],35:[function(require,module,exports){
+},{"./compressedObject":2,"./compressions":3,"./crc32":4,"./reader/readerFor":23,"./signature":24,"./support":31,"./utf8":32,"./utils":33}],36:[function(require,module,exports){
 "use strict";
 
 var StreamHelper = require("./stream/StreamHelper");
 var DataWorker = require("./stream/DataWorker");
+var external = require("./external");
 var utf8 = require("./utf8");
 var CompressedObject = require("./compressedObject");
 var GenericWorker = require("./stream/GenericWorker");
+var flate = require("./flate");
+var nativeInflate = require("./nativeInflate");
 
 /**
  * A simple object representing a file in the zip file.
@@ -4284,6 +4268,17 @@ ZipObject.prototype = {
      * @return StreamHelper the stream.
      */
     internalStream: function (type) {
+        return this._internalStream(type, null);
+    },
+
+    /**
+     * @see internalStream
+     * @private
+     * @param {String} type the type of each chunk.
+     * @param {GenericWorker|null} decompressedWorker the decompressed content, or null for the default.
+     * @return StreamHelper the stream.
+     */
+    _internalStream: function (type, decompressedWorker) {
         var result = null, outputType = "string";
         try {
             if (!type) {
@@ -4294,7 +4289,7 @@ ZipObject.prototype = {
             if (outputType === "binarystring" || outputType === "text") {
                 outputType = "string";
             }
-            result = this._decompressWorker();
+            result = decompressedWorker || this._decompressWorker();
 
             var isUnicodeString = !this._dataBinary;
 
@@ -4319,7 +4314,26 @@ ZipObject.prototype = {
      * @return Promise the promise of the result.
      */
     async: function (type, onUpdate) {
-        return this.internalStream(type).accumulate(onUpdate);
+        var data = this._data;
+        if (!(data instanceof CompressedObject && data.compression.magic === flate.magic)) {
+            return this.internalStream(type).accumulate(onUpdate);
+        }
+        var self = this;
+        return nativeInflate.inflate(data.compressedContent, data.uncompressedSize).then(function (inflated) {
+            if (!inflated) {
+                // Fall back to pako.
+                return self.internalStream(type).accumulate(onUpdate);
+            }
+            if (self._dataBinary && !onUpdate) {
+                if (type === "uint8array") {
+                    return inflated;
+                }
+                if (type === "string" || type === "text") {
+                    return utf8.utf8decode(inflated);
+                }
+            }
+            return self._internalStream(type, new DataWorker(external.Promise.resolve(inflated))).accumulate(onUpdate);
+        });
     },
 
     /**
@@ -4379,7 +4393,7 @@ for(var i = 0; i < removedMethods.length; i++) {
 }
 module.exports = ZipObject;
 
-},{"./compressedObject":2,"./stream/DataWorker":27,"./stream/GenericWorker":28,"./stream/StreamHelper":29,"./utf8":31}],36:[function(require,module,exports){
+},{"./compressedObject":2,"./external":6,"./flate":7,"./nativeInflate":12,"./stream/DataWorker":28,"./stream/GenericWorker":29,"./stream/StreamHelper":30,"./utf8":32}],37:[function(require,module,exports){
 (function (global){
 'use strict';
 var Mutation = global.MutationObserver || global.WebKitMutationObserver;
@@ -4452,7 +4466,7 @@ function immediate(task) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],37:[function(require,module,exports){
+},{}],38:[function(require,module,exports){
 'use strict';
 var immediate = require('immediate');
 
@@ -4727,7 +4741,7 @@ function race(iterable) {
   }
 }
 
-},{"immediate":36}],38:[function(require,module,exports){
+},{"immediate":37}],39:[function(require,module,exports){
 // Top level file is just a mixin of submodules & constants
 'use strict';
 
@@ -4743,7 +4757,7 @@ assign(pako, deflate, inflate, constants);
 
 module.exports = pako;
 
-},{"./lib/deflate":39,"./lib/inflate":40,"./lib/utils/common":41,"./lib/zlib/constants":44}],39:[function(require,module,exports){
+},{"./lib/deflate":40,"./lib/inflate":41,"./lib/utils/common":42,"./lib/zlib/constants":45}],40:[function(require,module,exports){
 'use strict';
 
 
@@ -5145,7 +5159,7 @@ exports.deflate = deflate;
 exports.deflateRaw = deflateRaw;
 exports.gzip = gzip;
 
-},{"./utils/common":41,"./utils/strings":42,"./zlib/deflate":46,"./zlib/messages":51,"./zlib/zstream":53}],40:[function(require,module,exports){
+},{"./utils/common":42,"./utils/strings":43,"./zlib/deflate":47,"./zlib/messages":52,"./zlib/zstream":54}],41:[function(require,module,exports){
 'use strict';
 
 
@@ -5570,7 +5584,7 @@ exports.inflate = inflate;
 exports.inflateRaw = inflateRaw;
 exports.ungzip  = inflate;
 
-},{"./utils/common":41,"./utils/strings":42,"./zlib/constants":44,"./zlib/gzheader":47,"./zlib/inflate":49,"./zlib/messages":51,"./zlib/zstream":53}],41:[function(require,module,exports){
+},{"./utils/common":42,"./utils/strings":43,"./zlib/constants":45,"./zlib/gzheader":48,"./zlib/inflate":50,"./zlib/messages":52,"./zlib/zstream":54}],42:[function(require,module,exports){
 'use strict';
 
 
@@ -5677,7 +5691,7 @@ exports.setTyped = function (on) {
 
 exports.setTyped(TYPED_OK);
 
-},{}],42:[function(require,module,exports){
+},{}],43:[function(require,module,exports){
 // String encode/decode helpers
 'use strict';
 
@@ -5866,7 +5880,7 @@ exports.utf8border = function (buf, max) {
   return (pos + _utf8len[buf[pos]] > max) ? pos : max;
 };
 
-},{"./common":41}],43:[function(require,module,exports){
+},{"./common":42}],44:[function(require,module,exports){
 'use strict';
 
 // Note: adler32 takes 12% for level 0 and 2% for level 6.
@@ -5919,7 +5933,7 @@ function adler32(adler, buf, len, pos) {
 
 module.exports = adler32;
 
-},{}],44:[function(require,module,exports){
+},{}],45:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -5989,7 +6003,7 @@ module.exports = {
   //Z_NULL:                 null // Use -1 or null inline, depending on var type
 };
 
-},{}],45:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 'use strict';
 
 // Note: we can't get significant speed boost here.
@@ -6050,7 +6064,7 @@ function crc32(crc, buf, len, pos) {
 
 module.exports = crc32;
 
-},{}],46:[function(require,module,exports){
+},{}],47:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -7926,7 +7940,7 @@ exports.deflatePrime = deflatePrime;
 exports.deflateTune = deflateTune;
 */
 
-},{"../utils/common":41,"./adler32":43,"./crc32":45,"./messages":51,"./trees":52}],47:[function(require,module,exports){
+},{"../utils/common":42,"./adler32":44,"./crc32":46,"./messages":52,"./trees":53}],48:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -7986,7 +8000,7 @@ function GZheader() {
 
 module.exports = GZheader;
 
-},{}],48:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -8333,7 +8347,7 @@ module.exports = function inflate_fast(strm, start) {
   return;
 };
 
-},{}],49:[function(require,module,exports){
+},{}],50:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -9891,7 +9905,7 @@ exports.inflateSyncPoint = inflateSyncPoint;
 exports.inflateUndermine = inflateUndermine;
 */
 
-},{"../utils/common":41,"./adler32":43,"./crc32":45,"./inffast":48,"./inftrees":50}],50:[function(require,module,exports){
+},{"../utils/common":42,"./adler32":44,"./crc32":46,"./inffast":49,"./inftrees":51}],51:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -10236,7 +10250,7 @@ module.exports = function inflate_table(type, lens, lens_index, codes, table, ta
   return 0;
 };
 
-},{"../utils/common":41}],51:[function(require,module,exports){
+},{"../utils/common":42}],52:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -10270,7 +10284,7 @@ module.exports = {
   '-6':   'incompatible version' /* Z_VERSION_ERROR (-6) */
 };
 
-},{}],52:[function(require,module,exports){
+},{}],53:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -11494,7 +11508,7 @@ exports._tr_flush_block  = _tr_flush_block;
 exports._tr_tally = _tr_tally;
 exports._tr_align = _tr_align;
 
-},{"../utils/common":41}],53:[function(require,module,exports){
+},{"../utils/common":42}],54:[function(require,module,exports){
 'use strict';
 
 // (C) 1995-2013 Jean-loup Gailly and Mark Adler
@@ -11543,7 +11557,7 @@ function ZStream() {
 
 module.exports = ZStream;
 
-},{}],54:[function(require,module,exports){
+},{}],55:[function(require,module,exports){
 (function (global){
 (function (global, undefined) {
     "use strict";
