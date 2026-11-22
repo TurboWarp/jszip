@@ -1,6 +1,6 @@
 {
   "name": "@turbowarp/jszip",
-  "version": "3.12.0",
+  "version": "4.0.0",
   "author": "Stuart Knightley <stuart@stuartk.com>",
   "description": "Create, read and edit .zip files with JavaScript http://stuartk.com/jszip",
   "scripts": {
